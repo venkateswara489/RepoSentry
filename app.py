@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import json
@@ -11,29 +10,19 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlencode, quote
+from urllib.parse import quote
 import httpx
-from cryptography.fernet import Fernet
 from fastapi import FastAPI,HTTPException,Request
-from fastapi.responses import FileResponse,JSONResponse,RedirectResponse
+from fastapi.responses import FileResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
-from scanner import analyze,SECRET,EXTENSIONS
+from scanner import analyze,EXTENSIONS
 from dependencies import check as check_dependencies
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR',str(ROOT/'work')))
 DATA.mkdir(parents=True,exist_ok=True)
-KEY=os.getenv('ENCRYPTION_KEY')
-if not KEY:
-    keyfile=DATA/'encryption.key'
-    if not keyfile.exists():
-        keyfile.write_bytes(Fernet.generate_key()); keyfile.chmod(0o600)
-    KEY=keyfile.read_bytes()
-CIPHER=Fernet(KEY)
 BASE=os.getenv('BASE_URL','http://localhost:8000').rstrip('/')
-CLIENT=os.getenv('GITHUB_CLIENT_ID','')
-CLIENT_SECRET=os.getenv('GITHUB_CLIENT_SECRET','')
 DEMO=os.getenv('DEMO_MODE','false').lower()=='true'
 POOL=ThreadPoolExecutor(max_workers=2)
 app=FastAPI(title='RepoSentry',docs_url='/api/docs')
@@ -45,10 +34,13 @@ def db():
     finally: c.close()
 
 with db() as c:
-    c.executescript('''CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user TEXT,token TEXT,csrf TEXT,expires REAL);
-CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY,expires REAL);
-CREATE TABLE IF NOT EXISTS scans(id TEXT PRIMARY KEY,owner TEXT,repo TEXT,status TEXT,data TEXT,created REAL);
-UPDATE scans SET status='failed' WHERE status IN ('queued','downloading','scanning');''')
+    c.executescript("""CREATE TABLE IF NOT EXISTS visitors(id TEXT PRIMARY KEY,csrf TEXT,expires REAL);
+CREATE TABLE IF NOT EXISTS public_scans(id TEXT PRIMARY KEY,owner TEXT,repo TEXT,status TEXT,data TEXT,created REAL);
+UPDATE public_scans SET status='failed' WHERE status IN ('queued','downloading','scanning');""")
+    # Invalidate legacy OAuth sessions, including their stored encrypted tokens.
+    for legacy in ('sessions','oauth'):
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(legacy,)).fetchone():
+            c.execute('DELETE FROM '+legacy)
 
 @app.middleware('http')
 async def headers(request,call_next):
@@ -60,77 +52,40 @@ async def headers(request,call_next):
     return response
 
 def session(request,write=False):
-    sid=request.cookies.get('session','')
-    with db() as c: row=c.execute('SELECT * FROM sessions WHERE id=? AND expires>?',(hashlib.sha256(sid.encode()).hexdigest(),time.time())).fetchone()
-    if not row: raise HTTPException(401,'Please sign in first.')
-    if write and not secrets.compare_digest(request.headers.get('x-csrf-token',''),row['csrf']): raise HTTPException(403,'Invalid request token. Refresh and retry.')
-    result=dict(row); user=json.loads(result['user'])
-    result['owner']='demo:'+result['id'] if user.get('demo') else 'github:'+user['id']
-    return result
+    sid=request.cookies.get('visitor','')
+    with db() as c:
+        row=c.execute('SELECT * FROM visitors WHERE id=? AND expires>?',(hashlib.sha256(sid.encode()).hexdigest(),time.time())).fetchone()
+    if not row: raise HTTPException(401,'Refresh the page to initialize this browser session.')
+    if write and not secrets.compare_digest(request.headers.get('x-csrf-token',''),row['csrf']):
+        raise HTTPException(403,'Invalid request token. Refresh and retry.')
+    result=dict(row); result['owner']=result['id']; return result
 
-def create_session(user,token):
+@app.get('/api/session')
+def browser_session(request:Request):
+    try:
+        current=session(request)
+        return {'csrf':current['csrf']}
+    except HTTPException:
+        pass
     sid,csrf=secrets.token_urlsafe(32),secrets.token_urlsafe(32)
-    with db() as c: c.execute('INSERT INTO sessions VALUES(?,?,?,?,?)',(hashlib.sha256(sid.encode()).hexdigest(),json.dumps(user),CIPHER.encrypt(token.encode()).decode(),csrf,time.time()+28800))
-    response=RedirectResponse('/',status_code=303)
-    response.set_cookie('session',sid,httponly=True,secure=BASE.startswith('https:'),samesite='lax',max_age=28800)
+    with db() as c:
+        c.execute('DELETE FROM visitors WHERE expires<?',(time.time(),))
+        c.execute('INSERT INTO visitors VALUES(?,?,?)',(hashlib.sha256(sid.encode()).hexdigest(),csrf,time.time()+7*86400))
+    response=JSONResponse({'csrf':csrf})
+    response.set_cookie('visitor',sid,httponly=True,secure=BASE.startswith('https:'),samesite='lax',max_age=7*86400)
+    response.delete_cookie('session'); response.delete_cookie('oauth_state')
     return response
-
-def gh(token,method,path,**kwargs):
-    with httpx.Client(timeout=30,follow_redirects=False) as client:
-        r=client.request(method,'https://api.github.com'+path,headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},**kwargs)
-    if r.status_code>=400: raise RuntimeError(f'GitHub returned {r.status_code}. Check access and API limits. A failed write can leave a branch.')
-    return r.json() if r.content else {}
 
 @app.get('/api/config')
-def config(): return {'githubConfigured':bool(CLIENT and CLIENT_SECRET),'demoEnabled':DEMO}
+def config(): return {'publicOnly':True,'demoEnabled':DEMO}
 
-@app.get('/auth/github')
-def login():
-    if not CLIENT or not CLIENT_SECRET: raise HTTPException(503,'Configure GitHub OAuth credentials first.')
-    state=secrets.token_urlsafe(32)
-    with db() as c:
-        c.execute('DELETE FROM oauth WHERE expires<?',(time.time(),))
-        c.execute('INSERT INTO oauth VALUES(?,?)',(state,time.time()+600))
-    response=RedirectResponse('https://github.com/login/oauth/authorize?'+urlencode(dict(client_id=CLIENT,redirect_uri=BASE+'/auth/callback',scope='repo read:user',state=state)))
-    response.set_cookie('oauth_state',state,httponly=True,secure=BASE.startswith('https:'),samesite='lax',max_age=600)
-    return response
-
-@app.get('/auth/callback')
-def callback(request:Request,code:str='',state:str=''):
-    if not state or not secrets.compare_digest(state,request.cookies.get('oauth_state','')): raise HTTPException(400,'OAuth state mismatch.')
-    with db() as c:
-        valid=c.execute('SELECT state FROM oauth WHERE state=? AND expires>?',(state,time.time())).fetchone()
-        c.execute('DELETE FROM oauth WHERE state=?',(state,))
-    if not valid: raise HTTPException(400,'OAuth request expired.')
-    with httpx.Client(timeout=30) as client:
-        result=client.post('https://github.com/login/oauth/access_token',headers={'Accept':'application/json'},json=dict(client_id=CLIENT,client_secret=CLIENT_SECRET,code=code,redirect_uri=BASE+'/auth/callback')).json()
-    token=result.get('access_token')
-    if not token: raise HTTPException(400,'GitHub authorization failed.')
-    user=gh(token,'GET','/user')
-    response=create_session(dict(login=user['login'],id=str(user['id']),avatar_url=user['avatar_url'],demo=False),token)
-    response.delete_cookie('oauth_state'); return response
-
-@app.get('/auth/demo')
-def demo():
-    if not DEMO: raise HTTPException(404)
-    return create_session(dict(login='demo-explorer',demo=True),'')
-
-@app.get('/api/me')
-def me(request:Request):
-    s=session(request); return dict(user=json.loads(s['user']),csrf=s['csrf'])
-
-@app.post('/api/logout')
-def logout(request:Request):
-    s=session(request,True)
-    with db() as c: c.execute('DELETE FROM sessions WHERE id=?',(s['id'],))
-    response=JSONResponse({'ok':True}); response.delete_cookie('session'); return response
-
-@app.get('/api/repos')
-def repos(request:Request):
-    s=session(request)
-    if json.loads(s['user']).get('demo'): return []
-    rows=gh(CIPHER.decrypt(s['token']).decode(),'GET','/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member')
-    return [dict(name=r['full_name'],private=r['private']) for r in rows]
+def gh(path):
+    with httpx.Client(timeout=30,follow_redirects=False) as client:
+        r=client.get('https://api.github.com'+path,headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
+    if r.status_code==404: raise RuntimeError('Public repository not found. Private repositories are not supported.')
+    if r.status_code in (403,429): raise RuntimeError('GitHub public API limit reached. Please retry later.')
+    if r.status_code>=400: raise RuntimeError(f'GitHub returned {r.status_code}. Please retry later.')
+    return r.json()
 
 def parse_repo(value):
     m=re.fullmatch(r'(?:https://github\.com/)?([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9_.-]{1,100})/?',value.strip())
@@ -141,12 +96,12 @@ def parse_repo(value):
 
 def update(scan_id,status,data=None):
     with db() as c:
-        if data is None: c.execute('UPDATE scans SET status=? WHERE id=?',(status,scan_id))
-        else: c.execute('UPDATE scans SET status=?,data=? WHERE id=?',(status,json.dumps(data),scan_id))
+        if data is None: c.execute('UPDATE public_scans SET status=? WHERE id=?',(status,scan_id))
+        else: c.execute('UPDATE public_scans SET status=?,data=? WHERE id=?',(status,json.dumps(data),scan_id))
 
-def download_files(repo,sha,token):
+def download_files(repo,sha):
     with httpx.Client(timeout=60,follow_redirects=False) as client:
-        with client.stream('GET',f'https://codeload.github.com/{repo}/zip/{sha}',headers={'Authorization':f'Bearer {token}'}) as response:
+        with client.stream('GET',f'https://codeload.github.com/{repo}/zip/{sha}') as response:
             response.raise_for_status(); chunks=[]; size=0
             for chunk in response.iter_bytes():
                 size+=len(chunk)
@@ -166,14 +121,17 @@ def download_files(repo,sha,token):
 
 DEMO_FILES={'src/service.py':'import requests\n\ndef fetch(url):\n    return requests.get(url, verify=False)\n\ndef start():\n    app.run(debug=True)\n\ndef pending():\n    # TODO: implement retries\n    pass\n\ntry:\n    run()\nexcept Exception:\n    pass\n','src/legacy.js':'// FIXME: validate input\nconst result = eval(userInput);\n'}
 
-def run_scan(scan_id,repo,encrypted_token,is_demo):
+def run_scan(scan_id,repo,is_demo):
     try:
-        update(scan_id,'downloading'); token=CIPHER.decrypt(encrypted_token).decode()
+        update(scan_id,'downloading')
         if is_demo: files,skipped,sha,branch=DEMO_FILES,0,'demo-snapshot','main'
         else:
-            branch=gh(token,'GET',f'/repos/{repo}')['default_branch']
-            sha=gh(token,'GET',f'/repos/{repo}/commits/{quote(branch,safe="")}')['sha']
-            files,skipped=download_files(repo,sha,token)
+            meta=gh(f'/repos/{repo}')
+            if meta.get('private'):
+                raise RuntimeError('Only public repositories are supported.')
+            branch=meta['default_branch']
+            sha=gh(f'/repos/{repo}/commits/{quote(branch,safe="")}')['sha']
+            files,skipped=download_files(repo,sha)
         update(scan_id,'scanning'); findings=analyze(files)
         deps,status=([],'Sample scan: advisory lookups disabled.') if is_demo else check_dependencies(files)
         findings.extend(deps)
@@ -182,77 +140,37 @@ def run_scan(scan_id,repo,encrypted_token,is_demo):
         update(scan_id,'failed',{'error':str(error) if isinstance(error,RuntimeError) else 'Repository access or analysis failed. Check access and retry.'})
 
 class ScanInput(BaseModel): repo:str=Field(min_length=3,max_length=250)
-class PRInput(BaseModel): findings:list[str]=Field(min_length=1,max_length=100)
 
 @app.post('/api/scans')
 def start_scan(request:Request,payload:ScanInput):
     s=session(request,True); repo=parse_repo(payload.repo)
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        c.execute('DELETE FROM scans WHERE created<?',(time.time()-7*86400,))
-        c.execute('DELETE FROM sessions WHERE expires<?',(time.time(),))
-        count=c.execute('SELECT count(*) FROM scans WHERE owner=? AND created>?',(s['owner'],time.time()-3600)).fetchone()[0]
-        active=c.execute("SELECT count(*) FROM scans WHERE status IN ('queued','downloading','scanning')").fetchone()[0]
+        c.execute('DELETE FROM public_scans WHERE created<?',(time.time()-7*86400,))
+        c.execute('DELETE FROM visitors WHERE expires<?',(time.time(),))
+        count=c.execute('SELECT count(*) FROM public_scans WHERE owner=? AND created>?',(s['owner'],time.time()-3600)).fetchone()[0]
+        active=c.execute("SELECT count(*) FROM public_scans WHERE status IN ('queued','downloading','scanning')").fetchone()[0]
         if count>=10 or active>=6: raise HTTPException(429,'Scan capacity reached. Retry later.')
         scan_id=secrets.token_hex(12)
-        c.execute('INSERT INTO scans VALUES(?,?,?,?,?,?)',(scan_id,s['owner'],repo,'queued','{}',time.time()))
-    POOL.submit(run_scan,scan_id,repo,s['token'],json.loads(s['user']).get('demo',False))
+        c.execute('INSERT INTO public_scans VALUES(?,?,?,?,?,?)',(scan_id,s['owner'],repo,'queued','{}',time.time()))
+    POOL.submit(run_scan,scan_id,repo,DEMO)
     return {'id':scan_id}
 
 @app.get('/api/scans')
 def scans(request:Request):
     s=session(request)
-    with db() as c: rows=c.execute('SELECT id,repo,status,created FROM scans WHERE owner=? ORDER BY created DESC LIMIT 50',(s['owner'],)).fetchall()
+    with db() as c: rows=c.execute('SELECT id,repo,status,created FROM public_scans WHERE owner=? ORDER BY created DESC LIMIT 50',(s['owner'],)).fetchall()
     return [dict(r) for r in rows]
 
 def get_scan(request,scan_id,write=False):
     s=session(request,write)
-    with db() as c: row=c.execute('SELECT * FROM scans WHERE id=? AND owner=?',(scan_id,s['owner'])).fetchone()
+    with db() as c: row=c.execute('SELECT * FROM public_scans WHERE id=? AND owner=?',(scan_id,s['owner'])).fetchone()
     if not row: raise HTTPException(404,'Scan not found.')
     return s,dict(row)
 
 @app.get('/api/scans/{scan_id}')
 def scan(request:Request,scan_id:str):
     _,row=get_scan(request,scan_id); row['data']=json.loads(row['data']); row.pop('owner'); return row
-
-@app.post('/api/scans/{scan_id}/pull-request')
-def pull_request(request:Request,scan_id:str,payload:PRInput):
-    s,row=get_scan(request,scan_id,True); report=json.loads(row['data'])
-    if row['status']!='completed' or report.get('demo'): raise HTTPException(400,'A completed live scan is required.')
-    selected=set(payload.findings)
-    fixes=[f for f in report['findings'] if f['id'] in selected and f.get('replacement') is not None]
-    if not fixes: raise HTTPException(422,'Select at least one available fix.')
-    if len({(f['path'],f['line']) for f in fixes})!=len(fixes): raise HTTPException(422,'Select one fix per source line, then rescan after merging.')
-    token=CIPHER.decrypt(s['token']).decode(); repo=row['repo']
-    try:
-        files={}
-        for fix in fixes:
-            path=fix['path']
-            if path not in files:
-                content=gh(token,'GET',f'/repos/{repo}/contents/{quote(path,safe="/")}?ref={report["commit"]}')
-                files[path]=base64.b64decode(content['content']).decode('utf-8')
-        for fix in fixes:
-            lines=files[fix['path']].splitlines(keepends=True)
-            if SECRET.search(lines[fix['line']-1]): raise RuntimeError('Credential-line changes are blocked.')
-            newline='\n' if lines[fix['line']-1].endswith('\n') else ''
-            lines[fix['line']-1]=fix['replacement']+newline; files[fix['path']]=''.join(lines)
-        branch='reposentry/'+scan_id+'-'+secrets.token_hex(3)
-        tree=gh(token,'GET',f'/repos/{repo}/git/commits/{report["commit"]}')['tree']['sha']
-        existing=gh(token,'GET',f'/repos/{repo}/git/trees/{tree}?recursive=1')
-        if existing.get('truncated'): raise RuntimeError('Repository tree is too large for a safe automatic fix.')
-        modes={e['path']:e['mode'] for e in existing['tree']}
-        entries=[]
-        for path,source in files.items():
-            if modes.get(path) not in ('100644','100755'): raise RuntimeError('Only regular files can be automatically fixed.')
-            blob=gh(token,'POST',f'/repos/{repo}/git/blobs',json={'content':source,'encoding':'utf-8'})
-            entries.append(dict(path=path,mode=modes[path],type='blob',sha=blob['sha']))
-        new_tree=gh(token,'POST',f'/repos/{repo}/git/trees',json=dict(base_tree=tree,tree=entries))
-        commit=gh(token,'POST',f'/repos/{repo}/git/commits',json=dict(message='fix: apply reviewed RepoSentry recommendations',tree=new_tree['sha'],parents=[report['commit']]))
-        gh(token,'POST',f'/repos/{repo}/git/refs',json={'ref':'refs/heads/'+branch,'sha':commit['sha']})
-        pr=gh(token,'POST',f'/repos/{repo}/pulls',json=dict(title='fix: address RepoSentry findings',head=branch,base=report['branch'],body='Applies explicitly selected fixes from scan '+scan_id+'. Review behavior and run project tests before merging. Repository code was not executed.',draft=True))
-        return {'url':pr['html_url']}
-    except (RuntimeError,KeyError,ValueError) as error:
-        raise HTTPException(409,str(error) if isinstance(error,RuntimeError) else 'Unable to prepare changes. Rescan and retry. A branch may exist.')
 
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 @app.get('/')

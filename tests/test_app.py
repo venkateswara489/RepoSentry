@@ -15,8 +15,7 @@ def client():
     with TestClient(module.app) as c: yield c
 
 def login(c):
-    c.get('/auth/demo')
-    return {'x-csrf-token':c.get('/api/me').json()['csrf']}
+    return {'x-csrf-token':c.get('/api/session').json()['csrf']}
 
 def test_auth_csrf(client):
     assert client.get('/api/scans').status_code==401
@@ -35,12 +34,11 @@ def test_demo_isolation(client):
     assert r['status']=='completed'
     assert r['data']['demo']
     assert any(f['replacement'] for f in r['data']['findings'])
-    assert client.post('/api/scans/'+sid+'/pull-request',json={'findings':['x']},headers=headers).status_code==400
+    assert client.post('/api/scans/'+sid+'/pull-request',json={'findings':['x']},headers=headers).status_code==404
     with TestClient(module.app) as other:
         login(other)
         assert other.get('/api/scans/'+sid).status_code==404
-    assert client.post('/api/logout',headers=headers).status_code==200
-    assert client.get('/api/me').status_code==401
+    assert client.get('/api/me').status_code==404
 
 @pytest.mark.parametrize('value',['https://evil.com/o/r','https://github.com/o/r?x=1','o/..','o/r/../../foo','http://github.com/o/r'])
 def test_reject_url(value):
@@ -58,35 +56,53 @@ def test_redaction():
 
 def test_clean(): assert analyze({'clean.py':'def add(a,b):\n    return a+b\n'})==[]
 
-def test_oauth_state(client): assert client.get('/auth/callback?state=bad&code=fake').status_code==400
+def test_oauth_removed(client):
+    assert client.get('/auth/callback').status_code==404
+    assert client.get('/auth/github').status_code==404
+    assert client.get('/auth/demo').status_code==404
 
 def test_headers(client):
     r=client.get('/')
     assert r.status_code==200
     assert "frame-ancestors 'none'" in r.headers['content-security-policy']
 
-def test_pr_selected_pinned_and_mode_preserved(client,monkeypatch):
+def test_live_public_scan_without_credentials(client,monkeypatch):
     headers=login(client)
-    with module.db() as c:
-        c.execute('UPDATE sessions SET user=?',(json.dumps(dict(login='tester',id='42',demo=False)),))
-        c.execute('INSERT INTO scans VALUES(?,?,?,?,?,?)',('live','github:42','owner/repo','completed',json.dumps(dict(commit='a'*40,branch='main',demo=False,findings=[dict(id='fix1',path='app.py',line=1,replacement='verify=True')])),time.time()))
     calls=[]
-    def gh(token,method,path,**kwargs):
-        calls.append((method,path,kwargs))
-        if '/contents/' in path: return {'content':base64.b64encode(b'verify=False\n').decode()}
-        if method=='GET' and '/git/commits/' in path: return {'tree':{'sha':'old-tree'}}
-        if method=='GET' and '/git/trees/' in path: return {'tree':[{'path':'app.py','mode':'100755'}]}
-        if path.endswith('/git/blobs'): assert kwargs['json']['content']=='verify=True\n'; return {'sha':'blob'}
-        if path.endswith('/git/trees'): assert kwargs['json']['tree'][0]['mode']=='100755'; return {'sha':'tree'}
-        if path.endswith('/git/commits'): return {'sha':'commit'}
-        if path.endswith('/pulls'): assert kwargs['json']['draft']; return {'html_url':'https://github.com/owner/repo/pull/1'}
-        return {}
-    monkeypatch.setattr(module,'gh',gh)
-    r=client.post('/api/scans/live/pull-request',json={'findings':['fix1']},headers=headers)
-    assert r.status_code==200
-    assert r.json()['url'].endswith('/pull/1')
-    assert calls[0][1].endswith('?ref='+'a'*40)
-    assert not any('/merges' in path for _,path,_ in calls)
+    def github(path):
+        calls.append(path)
+        if '/commits/' in path: return {'sha':'a'*40}
+        return {'private':False,'default_branch':'main'}
+    monkeypatch.setattr(module,'gh',github)
+    monkeypatch.setattr(module,'download_files',lambda repo,sha:({'a.py':'eval(value)'},0))
+    monkeypatch.setattr(module,'check_dependencies',lambda files:([],'No dependency pins.'))
+    monkeypatch.setattr(module,'DEMO',False)
+    sid=client.post('/api/scans',json={'repo':'owner/repo'},headers=headers).json()['id']
+    for _ in range(100):
+        result=client.get('/api/scans/'+sid).json()
+        if result['status'] in ('completed','failed'): break
+        time.sleep(.01)
+    assert result['status']=='completed'
+    assert result['data']['demo'] is False
+    assert calls==['/repos/owner/repo','/repos/owner/repo/commits/main']
+
+def test_session_cookie(client):
+    r=client.get('/api/session')
+    assert 'HttpOnly' in r.headers['set-cookie']
+    assert client.get('/api/session').json()==r.json()
+    assert client.get('/api/config').json()['publicOnly'] is True
+
+def test_private_repository_rejected(client,monkeypatch):
+    headers=login(client)
+    monkeypatch.setattr(module,'DEMO',False)
+    monkeypatch.setattr(module,'gh',lambda path:{'private':True})
+    sid=client.post('/api/scans',json={'repo':'owner/private'},headers=headers).json()['id']
+    for _ in range(100):
+        result=client.get('/api/scans/'+sid).json()
+        if result['status']=='failed': break
+        time.sleep(.01)
+    assert result['status']=='failed'
+    assert 'Only public' in result['data']['error']
 
 def test_dependency_normalization(monkeypatch):
     import dependencies

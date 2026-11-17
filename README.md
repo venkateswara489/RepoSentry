@@ -1,8 +1,10 @@
 # RepoSentry
 
-A web-based repository review agent for security vulnerabilities, code quality gaps, and unfinished work. Scan public or authorized private GitHub repositories, inspect commit-pinned evidence, and open draft pull requests for selected fixes.
+A website that reviews **public GitHub repositories without login** for security risks, code quality gaps, dependency advisories, and unfinished work.
 
-## Quick start: sample mode
+Paste a repository URL, scan a pinned commit, inspect file/line evidence, filter findings, and export a JSON report. No GitHub OAuth app, credentials, or model API key is needed.
+
+## Run locally
 
 Requires Python 3.12+.
 
@@ -10,109 +12,92 @@ Requires Python 3.12+.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-DEMO_MODE=true python -m uvicorn app:app --host 127.0.0.1 --port 8000
-```
-
-On Windows PowerShell use `.venv\Scripts\Activate.ps1`, then `$env:DEMO_MODE="true"` before running `python -m uvicorn app:app --port 8000`.
-
-Open http://localhost:8000, click **Explore the sample scan**, and submit the prefilled repository. Sample mode analyzes a fixed fixture regardless of the input URL; it does not access GitHub or create PRs.
-
-## Enable real GitHub access
-
-Create a GitHub OAuth App under Settings → Developer settings → OAuth Apps. For local development:
-
-- Homepage: `http://localhost:8000`
-- Callback: `http://localhost:8000/auth/callback`
-
-Export configuration before starting the app:
-
-```bash
-export GITHUB_CLIENT_ID="your-client-id"
-export GITHUB_CLIENT_SECRET="your-client-secret"
-export BASE_URL="http://localhost:8000"
-export DEMO_MODE="false"
 python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-For PowerShell use `$env:VARIABLE="value"` instead of `export VARIABLE="value"`.
+Open http://localhost:8000 and paste a public GitHub repository URL.
 
-Click **Connect GitHub** and authorize access. The OAuth `repo` scope supports private repository reads and branch/PR writes. GitHub OAuth uses this broad scope; separate read-only authorization is not provided. Organizations may require OAuth approval or SSO authorization.
+Windows PowerShell: activate with `.venv\Scripts\Activate.ps1`, then run the same `python -m uvicorn` command.
 
-Tokens are encrypted in SQLite. Sessions expire after eight hours and use HttpOnly, SameSite cookies. Scan ownership uses GitHub user IDs across logins. For production, configure a persistent `ENCRYPTION_KEY`, use HTTPS, set the exact `BASE_URL`, and leave `DEMO_MODE=false`. Generate a key with:
+To try fixed sample data without network access:
 
 ```bash
-python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+DEMO_MODE=true python -m uvicorn app:app --port 8000
 ```
 
-Never commit credentials. Direct Python launches do not automatically read `.env`; export variables into the shell.
+On PowerShell, set `$env:DEMO_MODE="true"` first. Sample mode always analyzes a fixed fixture regardless of the URL. No sign-in is required in either mode.
 
-## Docker deployment
+## Deploy on Render
+
+1. Create a Docker web service from this repository using `main` and `./Dockerfile`.
+2. Mount a persistent disk at `/data` for scan history.
+3. Set `BASE_URL` to your exact HTTPS Render origin, `DATA_DIR=/data`, and `DEMO_MODE=false`.
+4. Use `/api/config` as the health check. The Dockerfile listens on port 8000.
+5. Run one service instance and one Uvicorn process; background jobs use an in-process pool.
+
+**GitHub OAuth has been removed.** Delete `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `ENCRYPTION_KEY` from Render's environment settings. They are no longer read. Existing authorizations on GitHub must be revoked separately under GitHub Settings → Applications → Authorized OAuth Apps if desired. Removing code does not revoke provider-side grants.
+
+The Google Search Console verification tag is retained. This change does not itself clear Chrome Safe Browsing warnings; Google must assess the review request.
+
+## Docker Compose
 
 ```bash
 cp .env.example .env
-# Configure GitHub credentials, BASE_URL, and ENCRYPTION_KEY in .env.
+# Set BASE_URL to your deployed origin when using HTTPS.
 docker compose up --build
 ```
 
-Compose reads `.env`. Keep `DATA_DIR=/data` for the persistent volume. Deploy the container to a VM/container host behind an HTTPS reverse proxy. The Python backend requires a server runtime; static-only and Cloudflare Worker-only hosting are not supported.
+The `.env` file is loaded by Compose. Direct Python launches require exported environment variables.
+
+## What changed from the OAuth version
+
+- Public repository scans work without signing in.
+- GitHub login, callback, account listing, private repository scans, and PR creation are removed.
+- Reports are isolated per browser through an opaque HttpOnly session cookie and CSRF-protected mutations. History is available for seven days in that browser; clearing cookies loses access.
+- Existing OAuth sessions and stored encrypted tokens are invalidated on startup. Old private reports are not exposed through the new API. Previously stored records remain in their legacy database table and can be removed by the operator under their retention policy.
+- Suggested remediation is informational; the website does not write changes to GitHub.
 
 ## Agent workflow
 
-**Discover → acquire → plan checks → analyze → normalize → review → propose fixes.**
+**Discover → acquire → select checks → analyze → normalize → recommend.**
 
-1. Validate GitHub URL, detect the default branch, and pin a commit SHA.
-2. Read a bounded archive from GitHub's fixed archive host in memory; never execute source, builds, or installation scripts.
-3. Select generic checks by source files, Python AST checks for Python, and dependency checks by supported manifests.
-4. Return file/line evidence, priority, recommendations, and coverage limitations.
-5. Filter findings, export JSON, and follow source links to the scanned commit.
-6. Select available fixes and inspect the diff. Create a **draft PR** from the scanned commit. Nothing is automatically merged.
+The agent validates a GitHub owner/repository, reads the default branch and commit SHA, then downloads a bounded source archive from GitHub's fixed archive host. It inspects content in memory without extracting, executing, building, or installing repository code. Checks are selected from file types and dependency manifests. Results include evidence, review priority, recommendations, and coverage limits.
 
-This deterministic agent needs no model API key and sends no source code to an LLM.
-
-## Implemented features
-
-| Area | Coverage |
+| Category | Checks |
 | --- | --- |
-| Login | GitHub OAuth with encrypted server-side tokens |
-| Repositories | Public and authorized private repositories; accessible-repository suggestions |
-| Security | Possible credentials (redacted), eval, selected shell calls, disabled TLS verification, debug mode |
+| Security | Possible hardcoded credentials (redacted), eval, selected shell calls, disabled TLS verification, debug mode |
 | Dependencies | OSV advisories for exact requirements.txt pins and npm package-lock v2/v3 |
-| Quality | Python syntax, functions with more than 10 branching constructs, repeated eight-line blocks |
-| Loose ends | TODO/FIXME/HACK, selected unimplemented patterns, empty Python functions, swallowed exceptions |
-| Fixes | Enable TLS verification and disable debug mode; review before creating a draft PR |
-| Dashboard | Severity/category filters, progress, scan history, source links, JSON export |
+| Code quality | Python syntax, functions with more than 10 branching constructs, repeated eight-line blocks |
+| Loose ends | TODO/FIXME/HACK, unimplemented patterns, empty Python functions, swallowed exceptions |
 
-## Limits and tradeoffs
+## Limits
 
-- Heuristics can flag examples, comments, tests, or intentional code. Treat findings as review candidates. A clean report does not establish security.
-- Automatic fixes are narrow and can change runtime behavior. Review and test resulting PRs. Credential rotation and dependency upgrades require manual action.
-- Draft PRs require write access to the repository. Fork-based PR creation is not implemented. Failed GitHub requests can leave a branch; inspect before retrying.
-- File executable modes are preserved; automatic fixes to symlinks or truncated Git trees are blocked.
-- OSV receives package names/versions, including from private repositories, but no source or GitHub credentials. Dependency lookup is limited to 300 supported pins; truncation/failure is reported. Advisory findings use medium review priority, not an authoritative CVSS severity.
-- Two in-process workers, six globally queued/running scans, ten scans/account/hour. Run one Uvicorn process. Jobs are not durable; interrupted scans fail on restart.
-- Archive limits: 25 MB compressed, 20,000 entries, 20 MB analyzed text, 2,000 source files, 500 KB/file. Generated/vendor folders are excluded. `.gitignore` is not interpreted.
-- Reports persist in SQLite; records older than seven days are removed on the next new scan. Downloaded sources exist only in memory. Protect the data volume and encryption key.
-- HTML export, suppression rules, full multi-language parsing, distributed queues, and Semgrep/Gitleaks integrations are future work.
-- Source is untrusted and not executed. The container runs as a non-root user, with dropped capabilities. This app is not a sandbox for arbitrary builds.
+- Findings are review candidates. Generic patterns may flag comments, examples, or intentional behavior. No findings does not establish security.
+- No private repository access, OAuth, GitHub tokens, automatic commits, or pull requests are supported.
+- Unauthenticated GitHub API requests have a shared rate limit (typically 60 requests/hour per server IP). Each live scan requires repository metadata and commit requests; GitHub may impose additional limits. Rate-limit errors are shown to users.
+- Two in-process workers; six globally queued/running jobs; ten scans per browser session per hour. Browser limits are not an account-based abuse control. Public production deployments should add edge rate limiting.
+- 25 MB compressed archive; 20,000 ZIP entries; 20 MB analyzed text; 2,000 files; 500 KB/file. Vendor/build directories are excluded. `.gitignore` is not interpreted.
+- Dependency lookup is capped at 300 pins. OSV receives package names/versions, not repository source. Missing advisory service coverage is reported. Medium dependency priority is not an authoritative CVSS severity.
+- Reports older than seven days are removed when a new scan starts. Source archives exist only in worker memory. Interrupted jobs are marked failed on restart.
+- HTML export, suppressions, distributed queues, and full multi-language syntax parsing are not implemented.
 
 ## API
 
 Interactive documentation: `/api/docs`.
 
-- `GET /auth/github`, `GET /auth/callback`
-- `GET /api/me`, `POST /api/logout`
-- `GET /api/repos`
-- `POST /api/scans` with `{ "repo": "owner/repository" }`
-- `GET /api/scans`, `GET /api/scans/{id}`
-- `POST /api/scans/{id}/pull-request` with selected finding IDs
+- `GET /api/config` — public-only and sample-mode settings
+- `GET /api/session` — initialize browser cookie and obtain CSRF token automatically
+- `POST /api/scans` — `{ "repo": "owner/repository" }`, with `X-CSRF-Token`
+- `GET /api/scans` — this browser's history
+- `GET /api/scans/{id}` — this browser's report
 
-Mutations require `X-CSRF-Token` from `/api/me`. Reports are owner-restricted. Browser rendering escapes source content and uses a restrictive content security policy. Repository URLs cannot target arbitrary hosts.
+No account login is required. Anonymous session isolation protects reports from other browsers and is not a GitHub authorization flow.
 
-## Verification
+## Verify
 
 ```bash
 python -m pytest -q
 node --check static/app.js
 ```
 
-Tests cover session authentication, CSRF, account isolation, URL validation, demo scans, redaction, clean-code handling, OAuth state rejection, response security headers, OSV normalization, and draft PR creation through a mocked GitHub transport. No tests perform real GitHub writes. Live OAuth and PR integration require an OAuth App configured by the operator.
+Tests cover browser sessions, CSRF, report isolation, public scans without credentials, private repository rejection, removed OAuth endpoints, URL validation, finding redaction, dependency normalization, and sample scans. External services are mocked in tests.

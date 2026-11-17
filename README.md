@@ -116,11 +116,3 @@ node --check static/app.js
 ```
 
 Tests cover session authentication, CSRF, account isolation, URL validation, demo scans, redaction, clean-code handling, OAuth state rejection, response security headers, OSV normalization, and draft PR creation through a mocked GitHub transport. No tests perform real GitHub writes. Live OAuth and PR integration require an OAuth App configured by the operator.
-
-## Hackathon demo
-
-1. Start sample mode and scan `sample/storefront`.
-2. Inspect security and loose-end findings and filter by severity.
-3. Export JSON and reopen the scan from history.
-4. Configure OAuth and scan a repository you own.
-5. Review an available fix and create a draft PR; run project tests before merging.

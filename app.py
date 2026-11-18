@@ -24,6 +24,8 @@ DATA=Path(os.getenv('DATA_DIR',str(ROOT/'work')))
 DATA.mkdir(parents=True,exist_ok=True)
 BASE=os.getenv('BASE_URL','http://localhost:8000').rstrip('/')
 DEMO=os.getenv('DEMO_MODE','false').lower()=='true'
+# Optional deployment credential. Never read a token from a browser request.
+PUBLIC_GITHUB_TOKEN=os.getenv('PUBLIC_GITHUB_TOKEN','').strip()
 POOL=ThreadPoolExecutor(max_workers=2)
 app=FastAPI(title='RepoSentry',docs_url='/api/docs')
 
@@ -80,11 +82,38 @@ def browser_session(request:Request):
 def config(): return {'publicOnly':True,'demoEnabled':DEMO}
 
 def gh(path):
+    headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+    if PUBLIC_GITHUB_TOKEN:
+        headers['Authorization']='Bearer '+PUBLIC_GITHUB_TOKEN
     with httpx.Client(timeout=30,follow_redirects=False) as client:
-        r=client.get('https://api.github.com'+path,headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
-    if r.status_code==404: raise RuntimeError('Public repository not found. Private repositories are not supported.')
-    if r.status_code in (403,429): raise RuntimeError('GitHub public API limit reached. Please retry later.')
-    if r.status_code>=400: raise RuntimeError(f'GitHub returned {r.status_code}. Please retry later.')
+        r=client.get('https://api.github.com'+path,headers=headers)
+    if r.status_code==404:
+        raise RuntimeError('Public repository not found. Private repositories are not supported.')
+    if r.status_code==401:
+        raise RuntimeError('The server GitHub token is invalid or expired. The operator must update PUBLIC_GITHUB_TOKEN in Render.')
+    if r.status_code in (403,429):
+        try:
+            message=str(r.json().get('message','')).lower()
+        except (ValueError,AttributeError):
+            message=''
+        limited=(r.status_code==429 or r.headers.get('x-ratelimit-remaining')=='0'
+                 or 'retry-after' in r.headers or 'rate limit' in message)
+        if limited:
+            delay=None
+            try:
+                if r.headers.get('retry-after'):
+                    delay=max(1,int(r.headers['retry-after']))
+                elif r.headers.get('x-ratelimit-reset'):
+                    delay=max(1,int(r.headers['x-ratelimit-reset'])-int(time.time()))
+            except (ValueError,OverflowError):
+                pass
+            wait=f' Retry in about {(delay+59)//60} minute(s).' if delay else ' Retry later.'
+            guidance=(' The server uses a shared unauthenticated IP quota; the operator can configure PUBLIC_GITHUB_TOKEN in Render.'
+                      if not PUBLIC_GITHUB_TOKEN else ' The configured server token quota is exhausted or temporarily restricted.')
+            raise RuntimeError('GitHub API rate limit reached.'+wait+guidance)
+        raise RuntimeError('GitHub denied this server request (403). This is not a confirmed rate-limit response; check token permissions or GitHub access restrictions.')
+    if r.status_code>=400:
+        raise RuntimeError(f'GitHub returned {r.status_code}. Please retry later.')
     return r.json()
 
 def parse_repo(value):

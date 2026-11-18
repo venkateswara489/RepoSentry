@@ -114,3 +114,32 @@ def test_dependency_normalization(monkeypatch):
     assert findings[0]['confidence']=='advisory-match'
     assert findings[0]['replacement'] is None
     assert '1 pinned' in status
+
+@pytest.mark.parametrize('status,headers,body,expected',[
+    (403,{'x-ratelimit-remaining':'0','x-ratelimit-reset':'2000000000'},{'message':'API rate limit exceeded'},'Retry in about'),
+    (403,{}, {'message':'Resource not accessible by integration'},'not a confirmed rate-limit'),
+    (429,{'retry-after':'120'}, {},'2 minute(s)'),
+    (401,{}, {},'invalid or expired'),
+])
+def test_github_errors(monkeypatch,status,headers,body,expected):
+    import httpx
+    monkeypatch.setattr(module,'PUBLIC_GITHUB_TOKEN','')
+    transport=httpx.MockTransport(lambda request:httpx.Response(status,headers=headers,json=body))
+    real_client=httpx.Client
+    monkeypatch.setattr(module.httpx,'Client',lambda **kw:real_client(transport=transport,**kw))
+    with pytest.raises(RuntimeError,match=__import__('re').escape(expected)):
+        module.gh('/repos/owner/repo')
+
+def test_server_token_is_only_in_api_header(client,monkeypatch):
+    import httpx
+    token='fake-test-server-token'
+    monkeypatch.setattr(module,'PUBLIC_GITHUB_TOKEN',token)
+    def respond(request):
+        assert request.url.host=='api.github.com'
+        assert request.headers['authorization']=='Bearer '+token
+        return httpx.Response(200,json={'private':False})
+    real_client=httpx.Client
+    transport=httpx.MockTransport(respond)
+    monkeypatch.setattr(module.httpx,'Client',lambda **kw:real_client(transport=transport,**kw))
+    assert module.gh('/repos/owner/repo')=={'private':False}
+    assert token not in client.get('/api/config').text

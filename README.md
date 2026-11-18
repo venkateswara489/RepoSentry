@@ -2,7 +2,7 @@
 
 A website that reviews **public GitHub repositories without login** for security risks, code quality gaps, dependency advisories, and unfinished work.
 
-Paste a repository URL, scan a pinned commit, inspect file/line evidence, filter findings, and export a JSON report. No GitHub OAuth app, credentials, or model API key is needed.
+Paste a repository URL, scan a pinned commit, inspect file/line evidence, filter findings, and export a JSON report. No visitor login, GitHub OAuth app, or model API key is needed. An optional server token raises the GitHub API quota.
 
 ## Run locally
 
@@ -73,8 +73,8 @@ The agent validates a GitHub owner/repository, reads the default branch and comm
 ## Limits
 
 - Findings are review candidates. Generic patterns may flag comments, examples, or intentional behavior. No findings does not establish security.
-- No private repository access, OAuth, GitHub tokens, automatic commits, or pull requests are supported.
-- Unauthenticated GitHub API requests have a shared rate limit (typically 60 requests/hour per server IP). Each live scan requires repository metadata and commit requests; GitHub may impose additional limits. Rate-limit errors are shown to users.
+- No private repository access, visitor OAuth, automatic commits, or pull requests are supported. An optional operator token is used only by the server for API reads.
+- Without `PUBLIC_GITHUB_TOKEN`, unauthenticated GitHub API requests have a shared rate limit (typically 60 requests/hour per server IP). Each live scan requires repository metadata and commit requests; GitHub may impose additional limits. Rate-limit errors are shown to users.
 - Two in-process workers; six globally queued/running jobs; ten scans per browser session per hour. Browser limits are not an account-based abuse control. Public production deployments should add edge rate limiting.
 - 25 MB compressed archive; 20,000 ZIP entries; 20 MB analyzed text; 2,000 files; 500 KB/file. Vendor/build directories are excluded. `.gitignore` is not interpreted.
 - Dependency lookup is capped at 300 pins. OSV receives package names/versions, not repository source. Missing advisory service coverage is reported. Medium dependency priority is not an authoritative CVSS severity.
@@ -101,3 +101,14 @@ node --check static/app.js
 ```
 
 Tests cover browser sessions, CSRF, report isolation, public scans without credentials, private repository rejection, removed OAuth endpoints, URL validation, finding redaction, dependency normalization, and sample scans. External services are mocked in tests.
+
+## Avoid shared-IP GitHub API limits on Render
+
+A first scan can fail because unauthenticated GitHub API quota belongs to the server IP, not the visitor. Render outbound IP addresses can be shared. A generic 403 is now distinguished from a confirmed rate limit; when GitHub returns reset headers, the report shows an approximate retry interval.
+
+1. Open GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
+2. Choose a short expiration and **Public repositories (read-only)**. Do not grant private repository access or write permissions.
+3. Copy the token directly into Render → this service → Environment as `PUBLIC_GITHUB_TOKEN`. Do not paste it into chat, source files, or the website.
+4. Save and redeploy. Visitors still scan without login.
+
+Authenticated REST requests typically allow 5,000 requests/hour for a personal account, subject to GitHub policies and secondary limits. The quota is still shared across visitors. Invalid credentials and denied requests have separate error messages. The token is not returned by `/api/config` and is sent only to `api.github.com`, never to archive downloads, OSV, or the browser. The worker explicitly rejects repository metadata marked private even if an incorrectly configured token can access it.

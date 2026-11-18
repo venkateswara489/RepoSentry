@@ -110,6 +110,7 @@ def test_dependency_normalization(monkeypatch):
         def raise_for_status(self): pass
         def json(self): return {'results':[{'vulns':[{'id':'TEST-2026-001'}]}]}
     monkeypatch.setattr(dependencies.httpx.Client,'post',lambda *a,**k:Response())
+    monkeypatch.setattr(dependencies.httpx.Client,'get',lambda *a,**k:Response())
     findings,status=dependencies.check({'requirements.txt':'example==1.0.0\n'})
     assert findings[0]['confidence']=='advisory-match'
     assert findings[0]['replacement'] is None
@@ -143,3 +144,17 @@ def test_server_token_is_only_in_api_header(client,monkeypatch):
     monkeypatch.setattr(module.httpx,'Client',lambda **kw:real_client(transport=transport,**kw))
     assert module.gh('/repos/owner/repo')=={'private':False}
     assert token not in client.get('/api/config').text
+
+def test_sample_button_works_with_live_mode(client,monkeypatch):
+    headers=login(client)
+    monkeypatch.setattr(module,'DEMO',False)
+    def forbid(*args): raise AssertionError('Sample must never access GitHub')
+    monkeypatch.setattr(module,'gh',forbid)
+    sid=client.post('/api/scans',json={'repo':'sample/storefront','sample':True},headers=headers).json()['id']
+    for _ in range(100):
+        result=client.get('/api/scans/'+sid).json()
+        if result['status']=='completed': break
+        time.sleep(.01)
+    assert result['data']['demo'] is True
+    assert result['data']['schema_version']==2
+    assert result['data']['summary']['action_areas']>0

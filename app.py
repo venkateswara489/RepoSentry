@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
 from scanner import analyze,EXTENSIONS
 from dependencies import check as check_dependencies
+from reporting import prepare_report
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR',str(ROOT/'work')))
@@ -150,6 +151,9 @@ def download_files(repo,sha):
 
 DEMO_FILES={'src/service.py':'import requests\n\ndef fetch(url):\n    return requests.get(url, verify=False)\n\ndef start():\n    app.run(debug=True)\n\ndef pending():\n    # TODO: implement retries\n    pass\n\ntry:\n    run()\nexcept Exception:\n    pass\n','src/legacy.js':'// FIXME: validate input\nconst result = eval(userInput);\n'}
 
+# Sample includes one quality candidate, without accessing a repository.
+DEMO_FILES['src/complexity.py']='def calculate(value):\n'+''.join(f'    if value == {i}:\n        value += 1\n' for i in range(11))+'    return value\n'
+
 def run_scan(scan_id,repo,is_demo):
     try:
         update(scan_id,'downloading')
@@ -168,7 +172,9 @@ def run_scan(scan_id,repo,is_demo):
     except Exception as error:
         update(scan_id,'failed',{'error':str(error) if isinstance(error,RuntimeError) else 'Repository access or analysis failed. Check access and retry.'})
 
-class ScanInput(BaseModel): repo:str=Field(min_length=3,max_length=250)
+class ScanInput(BaseModel):
+    repo:str=Field(min_length=3,max_length=250)
+    sample:bool=False
 
 @app.post('/api/scans')
 def start_scan(request:Request,payload:ScanInput):
@@ -182,7 +188,7 @@ def start_scan(request:Request,payload:ScanInput):
         if count>=10 or active>=6: raise HTTPException(429,'Scan capacity reached. Retry later.')
         scan_id=secrets.token_hex(12)
         c.execute('INSERT INTO public_scans VALUES(?,?,?,?,?,?)',(scan_id,s['owner'],repo,'queued','{}',time.time()))
-    POOL.submit(run_scan,scan_id,repo,DEMO)
+    POOL.submit(run_scan,scan_id,repo,DEMO or payload.sample)
     return {'id':scan_id}
 
 @app.get('/api/scans')
@@ -199,7 +205,9 @@ def get_scan(request,scan_id,write=False):
 
 @app.get('/api/scans/{scan_id}')
 def scan(request:Request,scan_id:str):
-    _,row=get_scan(request,scan_id); row['data']=json.loads(row['data']); row.pop('owner'); return row
+    _,row=get_scan(request,scan_id); row['data']=json.loads(row['data'])
+    if row['status']=='completed': row['data']=prepare_report(row['data'])
+    row.pop('owner'); return row
 
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 @app.get('/')

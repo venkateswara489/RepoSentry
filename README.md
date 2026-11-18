@@ -79,7 +79,7 @@ The agent validates a GitHub owner/repository, reads the default branch and comm
 - 25 MB compressed archive; 20,000 ZIP entries; 20 MB analyzed text; 2,000 files; 500 KB/file. Vendor/build directories are excluded. `.gitignore` is not interpreted.
 - Dependency lookup is capped at 300 pins. OSV receives package names/versions, not repository source. Missing advisory service coverage is reported. Medium dependency priority is not an authoritative CVSS severity.
 - Reports older than seven days are removed when a new scan starts. Source archives exist only in worker memory. Interrupted jobs are marked failed on restart.
-- HTML export, suppressions, distributed queues, and full multi-language syntax parsing are not implemented.
+- Suppressions, distributed queues, and full multi-language syntax parsing are not implemented.
 
 ## API
 
@@ -112,3 +112,17 @@ A first scan can fail because unauthenticated GitHub API quota belongs to the se
 4. Save and redeploy. Visitors still scan without login.
 
 Authenticated REST requests typically allow 5,000 requests/hour for a personal account, subject to GitHub policies and secondary limits. The quota is still shared across visitors. Invalid credentials and denied requests have separate error messages. The token is not returned by `/api/config` and is sent only to `api.github.com`, never to archive downloads, OSV, or the browser. The worker explicitly rejects repository metadata marked private even if an incorrectly configured token can access it.
+
+## Reviewer-ready reporting (v2)
+
+- **Package-level action areas:** many dependency advisory records become one review card per manifest/package/version. Source findings remain separate.
+- **Alias-aware issue groups:** OSV ID/alias overlaps are merged transitively when details are available. Detail requests use eight workers and are capped at 40 records per scan; coverage reports exactly how many were enriched. Unenriched entries are retained.
+- **Honest severity:** published database severity is used where present, otherwise Unknown. CVSS vectors are not computed. Package severity is the highest available published label, not an exploitability claim or proof that every advisory was assessed.
+- **Readable recommendations:** every card has “What this means” and “What to do next,” expandable advisory evidence, and an explanation of its severity basis. Advisory fixed versions are evidence for the matched package and may belong to different release branches; users must choose a version addressing all applicable issues and test it.
+- **Legacy compatibility:** old flat reports are grouped on read and default dependency severity becomes Unknown. No unverified alias deduplication is claimed for old records.
+- **Search and exports:** filter by severity/category, search package/file/rule text, download JSON or a script-free standalone HTML report.
+- **One-click offline sample:** Try sample scan works in a live deployment without GitHub or OSV requests. Source fixtures cover security, quality, and unfinished work.
+
+See [DEMO.md](DEMO.md) for a three-minute presentation script. The versioned JSON includes `schema_version: 2`, summary counts, raw advisory counts, and grouped findings.
+
+No external model or analytics service is used.

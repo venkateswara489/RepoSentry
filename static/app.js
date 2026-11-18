@@ -79,10 +79,26 @@ $('sample-button').onclick=()=>start(true);
 $('severity').onchange=render;$('category').onchange=render;$('search').oninput=render;
 $('refresh').onclick=history;$('history-link').onclick=()=>$('history').scrollIntoView({behavior:'smooth'});$('overview').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});
 function save(content,type,suffix){const url=URL.createObjectURL(new Blob([content],{type}));const a=document.createElement('a');a.href=url;a.download='reposentry-'+current.id+'.'+suffix;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+$('explain-report').onclick=async()=>{
+  if(current?.status!=='completed')return;
+  const report=current,button=$('explain-report');
+  const findings=report.data.findings.filter(f=>!f.ai||f.ai.status!=='generated').slice(0,10);
+  button.disabled=true;
+  try{
+    for(let i=0;i<findings.length;i++){
+      if(current!==report)break;
+      button.textContent=`Explaining ${i+1} / ${findings.length}…`;
+      findings[i].ai=await api('/api/scans/'+report.id+'/findings/'+findings[i].id+'/explain',{method:'POST'});
+      render();
+      if(findings[i].ai.status==='fallback'){notice(findings[i].ai.message);break;}
+    }
+  }catch(e){notice(e.message);}
+  finally{button.disabled=false;button.textContent='✦ Explain report with Groq';}
+};
 $('export').onclick=()=>{if(current?.status==='completed')save(JSON.stringify(current,null,2),'application/json','json');};
 $('export-html').onclick=()=>{
   if(current?.status!=='completed')return;
   const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'"><title>RepoSentry report</title></head><body><h1>RepoSentry: ${esc(current.repo)}</h1><p>Commit ${esc(current.data.commit)} · ${current.data.summary.action_areas} action areas · ${current.data.files} files analyzed</p><p>Static review candidates, not confirmed exploits. Review in context.</p>${current.data.findings.map(card).join('').replace(/<div class="ai-actions">[\s\S]*?<\/div>/g,'')}<h2>Coverage & limitations</h2>${$('coverage').innerHTML}</body></html>`;
   save(html,'text/html','html');
 };
-(async()=>{try{auth=await api('/api/session');const config=await api('/api/config');if(config.demoEnabled){$('repo').value='sample/storefront';$('connect-note').textContent='Sample mode: fixed fixture only; no repository is accessed.';}await history();}catch(e){notice(e.message);}})();
+(async()=>{try{auth=await api('/api/session');const config=await api('/api/config');$('connect-note').textContent+=(config.aiConfigured?' AI explanations available: after scanning, click Explain report with Groq.':' Groq is not configured; built-in explanations remain available.');if(config.demoEnabled){$('repo').value='sample/storefront';$('connect-note').textContent='Sample mode: fixed fixture only; no repository is accessed.';}await history();}catch(e){notice(e.message);}})();

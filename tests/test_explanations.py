@@ -75,3 +75,17 @@ def test_quota_blocks_remote_call(client,monkeypatch):
         c.executemany('INSERT INTO ai_calls VALUES(?,?)',[(owner,time.time())]*20)
     monkeypatch.setattr(ai,'generate',lambda f:(_ for _ in ()).throw(AssertionError('No API call allowed')))
     assert client.post(f'/api/scans/{sid}/findings/{fid}/explain',headers=headers).status_code==429
+
+def test_model_failure_has_actionable_message(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','fake')
+    real=httpx.Client
+    monkeypatch.setattr(ai.httpx,'Client',lambda **kw:real(transport=httpx.MockTransport(lambda r:httpx.Response(400,json={'error':{'message':'private upstream detail'}})),**kw))
+    result=ai.generate(FINDING)
+    assert 'GROQ_MODEL' in result['message']
+    assert 'HTTP 400' in result['message']
+    assert 'private upstream detail' not in str(result)
+
+def test_frontend_is_not_cached(client):
+    for path in ('/','/static/app.js','/static/style.css'):
+        assert client.get(path).headers['cache-control']=='no-store'
+    assert '?v=groq-2' in client.get('/').text

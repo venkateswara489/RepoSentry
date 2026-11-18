@@ -140,3 +140,7 @@ Responses must match a four-field schema. Missing/invalid credentials, quota lim
 Successful explanations are cached per browser owner, redacted evidence fingerprint, prompt version, and model for seven days. Limits are 20 uncached requests/browser/hour, 60 globally/hour, and two concurrent requests/process. Public deployments should also enforce edge rate limits; browser-session limits are not identity-based abuse controls. Changing or removing the key disables further generation; deleting provider-side credentials must be done separately in Groq.
 
 API: `POST /api/scans/{scan_id}/findings/{finding_id}/explain`, using the same browser cookie and CSRF header as scans. Ownership and completed-scan checks apply. Scanning itself still works without Groq.
+
+### Troubleshooting explanation display
+
+The homepage and static assets use no-store headers and versioned URLs to avoid stale interfaces. The report has a prominent Explain report with Groq button that processes up to ten unexplained action areas sequentially; it stops on fallback or an API error. Individual buttons remain available. Explanations are requested only when clicked and share redacted finding summaries with Groq. Model rejection, timeout, unavailable service, and invalid response formats have distinct messages. If Groq rejects a model/request, configure `GROQ_MODEL` to an active chat model in your Groq console and redeploy; never share your API key.

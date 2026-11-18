@@ -55,11 +55,29 @@ def generate(finding):
                     {'role':'user','content':json.dumps(evidence(finding))}]})
             if response.status_code in (401,403): return fallback(finding,'Groq rejected the server credentials. Check the key in Render.')
             if response.status_code==429: return fallback(finding,'Groq quota is temporarily exhausted. Built-in guidance is shown.')
+            if response.status_code in (400,404):
+                return fallback(finding,'Groq rejected the model or request (HTTP '+str(response.status_code)+'). Set GROQ_MODEL in Render to an active chat model ID from your Groq console, then redeploy.')
+            if response.status_code>=500:
+                return fallback(finding,'Groq is temporarily unavailable (HTTP '+str(response.status_code)+'). Please try again later.')
             response.raise_for_status()
             content=response.json()['choices'][0]['message']['content']
-            parsed=Explanation.model_validate_json(content)
+            if not isinstance(content,str):
+                return fallback(finding,'Groq returned an empty response. Please retry.')
+            clean=content.strip()
+            if clean.startswith('```'):
+                clean=re.sub(r'^```(?:json)?\s*|\s*```$','',clean)
+            try:
+                payload=json.loads(clean)
+                if isinstance(payload,dict) and isinstance(payload.get('explanation'),dict): payload=payload['explanation']
+                parsed=Explanation.model_validate(payload)
+            except (ValueError,ValidationError):
+                return fallback(finding,'Groq returned an explanation in an unsupported format. Try again or select another GROQ_MODEL in Render.')
         result={k:redact(v) for k,v in parsed.model_dump().items()}
         return dict(status='generated',provider='Groq',model=model_name(),explanation=result,
                     message='AI-generated guidance: verify against the evidence. It may be inaccurate; nothing was executed or changed.')
-    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,ValidationError):
-        return fallback(finding,'Groq could not produce a valid explanation. Built-in guidance is shown.')
+    except httpx.TimeoutException:
+        return fallback(finding,'Groq request timed out. Please try again later.')
+    except httpx.HTTPError:
+        return fallback(finding,'The server could not reach Groq successfully. Check Render connectivity and retry.')
+    except (ValueError,KeyError,IndexError,TypeError,ValidationError):
+        return fallback(finding,'Groq returned an unexpected response structure. Try another active GROQ_MODEL in Render.')

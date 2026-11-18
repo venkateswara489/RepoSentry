@@ -26,3 +26,9 @@ Core scanning has no LLM dependency. Optional Groq explanations turn a finding i
 ## Be candid
 
 This is a static review assistant, not a security certification. Dependency enrichment is capped at 40 records, so alias/severity coverage can be partial. GitHub and OSV availability affect live scans. Jobs run in-process; horizontal scaling needs a durable queue. Legacy reports cannot retrospectively establish advisory aliases or severity. No automatic PRs or private scans are included in this public-only edition.
+
+## Studio edition: show the breadth
+
+Start with the sample review and switch between Source code, Code quality, Loose ends, and Dependencies. Explain that source findings are sorted before package advisories in the review queue. Open What we looked at to show language coverage, analyzed files, and test-file signals. Explain why a missing test signal is not proof of missing tests.
+
+A fresh scan is required to gain the new source checks. For the resume-matcher example, point to returned exception text, runtime NLP downloads, and possibly unused imports alongside the existing debug flag. Do not describe dependency advisories as the only check family. Call out false-positive possibilities and static-analysis limits before demonstrating Groq as an explanation layer.

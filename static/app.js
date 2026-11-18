@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);
-let auth=null,current=null,poll=null;
+let auth=null,current=null,poll=null,view="all";
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options={}) {
   const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(auth?{'X-CSRF-Token':auth.csrf}:{}),...options.headers}});
@@ -34,8 +34,10 @@ async function load(id){
     notice('');$('results').hidden=false;$('welcome').hidden=true;
     const data=current.data,summary=data.summary;
     $('result-repo').textContent=current.repo;
+    $('source-map').innerHTML=sourceMap(data.inventory);
+    $('review-lenses').innerHTML=[['Source findings',summary.source_findings,'Patterns in application code'],['Dependency groups',summary.dependency_packages,'Packages to investigate'],['Code quality',summary.quality_findings,'Maintainability candidates'],['Loose ends',summary.loose_ends,'Unfinished or silent failures']].map(([label,count,note])=>`<div class="lens"><span>${esc(label)}</span><strong>${count||0}</strong><small>${esc(note)}</small></div>`).join('');
     $('result-meta').textContent=`${data.demo?'SAMPLE DATA · ':''}${data.files} files analyzed · ${data.skipped} skipped · commit ${data.commit.slice(0,12)}`;
-    $('report-summary').innerHTML=`<strong>${summary.action_areas} action areas to review</strong><p>${summary.dependency_packages} affected dependency groups · ${summary.advisory_records} advisory records · ${summary.advisory_groups} issue groups based on available aliases.</p><p>Counts describe review candidates, not proven exploits. Unknown means no verified severity was available. Start with source findings and published high-priority advisories; validate each in context.</p>`;
+    $('report-summary').innerHTML=`<strong>${summary.source_findings||0} source findings. ${summary.dependency_packages} dependency groups. One focused review.</strong><p>${summary.dependency_packages} affected dependency groups · ${summary.advisory_records} advisory records · ${summary.advisory_groups} issue groups based on available aliases.</p><p>Counts describe review candidates, not proven exploits. Unknown means no verified severity was available. Source findings appear first. Compare the review lenses, inspect the evidence, and validate each recommendation in context.</p>`;
     $('stats').innerHTML=['critical','high','medium','low','unknown'].map(s=>`<div class="stat ${s}"><span>${s==='unknown'?'Unknown severity':s}</span><strong>${summary.severities[s]||0}</strong><small>action areas</small></div>`).join('');
     $('coverage').innerHTML='<ul>'+[...data.coverage,...data.limitations].map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
     render();
@@ -54,10 +56,19 @@ function card(f){
   const source=current.data.demo?`<span class="source">${esc(f.path)}:${f.line}</span>`:`<a target="_blank" rel="noopener noreferrer" class="source" href="https://github.com/${esc(current.repo)}/blob/${esc(current.data.commit)}/${f.path.split('/').map(encodeURIComponent).join('/')}#L${f.line}">${esc(f.path)}:${f.line} ↗</a>`;
   return `<article class="finding"><div class="finding-top"><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span><h3>${esc(f.title)}</h3><span class="tag">${esc(f.category)}</span></div>${source}<pre>${esc(f.evidence)}</pre><h4>What this means</h4><p>${esc(f.explanation)}</p><h4>What to do next</h4><p>${esc(f.advice)}</p>${f.replacement?`<details><summary>Suggested code change — review before using</summary><pre>${esc(f.replacement)}</pre><p>This suggestion has not been executed or tested against your project.</p></details>`:''}<p class="severity-note">${esc(f.severity_basis)} · ${esc(f.confidence)}</p>${advisoryMarkup(f)}<div class="ai-actions"><button class="button" data-explain="${esc(f.id)}">✦ Explain with Groq</button><small>Shares a redacted finding summary with Groq.</small></div>${aiMarkup(f)}</article>`;
 }
+function sourceMap(inventory){
+  if(!inventory)return '<p class="coverage-note">This saved scan predates source inventory. Run a new scan to inspect language coverage and file-level scope.</p>';
+  return `<p class="coverage-note">${esc(inventory.scope)}</p><div>${Object.entries(inventory.languages).map(([name,count])=>`<span class="language-chip">${esc(name)} / ${count}</span>`).join('')}</div><div class="source-count"><span>Test files observed</span><b>${inventory.test_file_count}</b></div><p class="fineprint">${inventory.test_file_count?'Detected by filename; tests were not executed.':'No test-named files in analyzed scope. This does not prove the repository has no tests.'}</p><details><summary>Explore analyzed files</summary>${inventory.files.map(f=>`<div class="map-file"><b>${esc(f.path)}</b><br>${f.lines} lines · ${esc(f.language)}</div>`).join('')}</details><details><summary>Source checks enabled</summary><ul>${inventory.checks.map(c=>'<li>'+esc(c)+'</li>').join('')}</ul></details>`;
+}
+document.querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>{
+  view=button.dataset.view;
+  document.querySelectorAll('[data-view]').forEach(b=>{b.classList.toggle('selected',b===button);b.setAttribute('aria-pressed',String(b===button));});
+  $('severity').value='all';$('category').value='all';render();
+});
 function render(){
   if(!current||current.status!=='completed')return;
   const query=$('search').value.trim().toLowerCase();
-  const findings=current.data.findings.filter(f=>($('severity').value==='all'||f.severity===$('severity').value)&&($('category').value==='all'||f.category===$('category').value)&&(!query||[f.title,f.path,f.rule,f.evidence].join(' ').toLowerCase().includes(query)));
+  const findings=current.data.findings.filter(f=>(view==='all'||view==='source'&&!f.advisories||view==='dependencies'&&!!f.advisories||view==='quality'&&f.category==='quality'||view==='loose-ends'&&f.category==='loose-ends')&&($('severity').value==='all'||f.severity===$('severity').value)&&($('category').value==='all'||f.category===$('category').value)&&(!query||[f.title,f.path,f.rule,f.evidence].join(' ').toLowerCase().includes(query))).sort((a,b)=>Number(!!a.advisories)-Number(!!b.advisories));
   $('finding-count').textContent=findings.length;
   $('findings').innerHTML=findings.length?findings.map(card).join(''):'<div class="empty">No matching action areas. A clean report does not establish security.</div>';
   document.querySelectorAll('[data-explain]').forEach(button=>button.onclick=()=>explain(button));
@@ -82,7 +93,7 @@ function save(content,type,suffix){const url=URL.createObjectURL(new Blob([conte
 $('explain-report').onclick=async()=>{
   if(current?.status!=='completed')return;
   const report=current,button=$('explain-report');
-  const findings=report.data.findings.filter(f=>!f.ai||f.ai.status!=='generated').slice(0,10);
+  const findings=report.data.findings.filter(f=>!f.ai||f.ai.status!=='generated').sort((a,b)=>Number(!!a.advisories)-Number(!!b.advisories)).slice(0,10);
   button.disabled=true;
   try{
     for(let i=0;i<findings.length;i++){

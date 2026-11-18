@@ -88,4 +88,4 @@ def test_model_failure_has_actionable_message(monkeypatch):
 def test_frontend_is_not_cached(client):
     for path in ('/','/static/app.js','/static/style.css'):
         assert client.get(path).headers['cache-control']=='no-store'
-    assert '?v=groq-2' in client.get('/').text
+    assert '?v=studio-3' in client.get('/').text

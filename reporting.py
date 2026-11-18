@@ -35,6 +35,9 @@ def prepare_report(data):
     raw = sum(f.get('raw_advisory_count', 0) for f in findings)
     summary = dict(action_areas=len(findings), dependency_packages=sum('advisories' in f for f in findings),
         advisory_records=raw, advisory_groups=sum(len(f.get('advisories', [])) for f in findings),
+        source_findings=sum('advisories' not in f for f in findings),
+        quality_findings=sum(f.get('category')=='quality' for f in findings),
+        loose_ends=sum(f.get('category')=='loose-ends' for f in findings),
         severities=dict(Counter(f['severity'] for f in findings)))
     data.update(schema_version=2, findings=findings, summary=summary)
     return data

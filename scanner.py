@@ -4,7 +4,7 @@ import hashlib
 import re
 
 SECRET = re.compile(r'(?:api[_-]?key|secret|password|token)\s*[:=]\s*[\'"]([^\'"\n]{12,})[\'"]|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16})\b', re.I)
-EXTENSIONS = {'.py','.js','.ts','.jsx','.tsx','.java','.go','.rb','.php','.rs','.yaml','.yml','.json','.env','.toml','.sh','.txt'}
+EXTENSIONS = {'.py','.js','.ts','.jsx','.tsx','.java','.go','.rb','.php','.rs','.yaml','.yml','.json','.env','.toml','.sh','.txt','.html','.css','.vue','.svelte'}
 RULES = [
  ('dynamic-eval','high','security',r'\beval\s*\(','Dynamic code execution','Use explicit parsing instead of eval.',None),
  ('shell-execution','high','security',r'shell\s*=\s*True|\b(?:os\.system|child_process\.exec)\s*\(','Shell execution','Use validated argument arrays with shell disabled.',None),
@@ -48,4 +48,6 @@ def analyze(files):
             if block in blocks:
                 add(path,i+1,'duplication','low','quality','Repeated code block',lines[i].strip(),'Review duplication with '+blocks[block])
             else: blocks[block]=f'{path}:{i+1}'
+    from source_checks import inspect_sources
+    results.extend(inspect_sources(files))
     return sorted(results,key=lambda f:['critical','high','medium','low'].index(f['severity']))

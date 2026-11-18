@@ -144,3 +144,17 @@ API: `POST /api/scans/{scan_id}/findings/{finding_id}/explain`, using the same b
 ### Troubleshooting explanation display
 
 The homepage and static assets use no-store headers and versioned URLs to avoid stale interfaces. The report has a prominent Explain report with Groq button that processes up to ten unexplained action areas sequentially; it stops on fallback or an API error. Individual buttons remain available. Explanations are requested only when clicked and share redacted finding summaries with Groq. Model rejection, timeout, unavailable service, and invalid response formats have distinct messages. If Groq rejects a model/request, configure `GROQ_MODEL` to an active chat model in your Groq console and redeploy; never share your API key.
+
+## Code review studio / expanded source coverage
+
+The interface now uses a responsive charcoal/lime review workspace, with source-first review order and separate All findings, Source code, Dependencies, Code quality, and Loose ends lenses. Source evidence is not hidden behind dependency counts. The Groq report action also prioritizes source findings. There is no synthetic security score.
+
+New Python AST checks identify returned exception strings, empty error sentinels, bare except handlers, possibly unused imports, mutable collection defaults, HTTP calls without explicit timeouts, unsafe deserializer calls, runtime NLTK/spaCy downloads, interpolated SQL candidates, and functions longer than 60 lines. Import aliases are resolved for these call checks. JavaScript/TypeScript/HTML text checks identify HTML injection sinks, empty catch blocks, and Function constructors. HTML, CSS, Vue, and Svelte files now enter the supported archive scope; these do not receive full syntax or data-flow analysis.
+
+Every new source finding explains the observed construct, why it may matter, and a review step. “Possibly unused,” DOM sink, deserializer, and SQL findings require context: intentional re-exports, side effects, trusted input, or safe data flow may make them acceptable. Error-string returns may be internal functions rather than web responses. These are review candidates, not proven vulnerabilities.
+
+Each new report records language counts, analyzed file paths/line counts, check families, and test-named files observed. Test naming is a heuristic over the bounded analyzed set; absence is not proof that the repository has no tests. Tests are never executed. Old reports without inventory explain that a rescan is necessary. Existing saved reports do not retroactively gain new source checks.
+
+A local static recheck of the two current Python files in the example resume-matcher project produced seven source review candidates (two security, four quality, one loose end) without dependency lookups. Your results can vary with the scanned commit and newly included HTML files. Do not assume new findings until you run a fresh scan.
+
+For local browser preview only, install the Python `.venv`, then use `npm run dev -- --host 127.0.0.1 --port 8000`. Node is optional and no npm packages are required; production still runs through Uvicorn/Docker. The preview command uses sample mode.

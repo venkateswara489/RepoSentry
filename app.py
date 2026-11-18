@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
 from scanner import analyze,EXTENSIONS
+from source_checks import inventory
 from dependencies import check as check_dependencies
 from reporting import prepare_report
 import explanations
@@ -160,6 +161,8 @@ DEMO_FILES={'src/service.py':'import requests\n\ndef fetch(url):\n    return req
 # Sample includes one quality candidate, without accessing a repository.
 DEMO_FILES['src/complexity.py']='def calculate(value):\n'+''.join(f'    if value == {i}:\n        value += 1\n' for i in range(11))+'    return value\n'
 
+DEMO_FILES['src/review.py']='import pickle\nimport requests\n\ndef fetch(url, cache={}):\n    return requests.get(url)\n\ndef restore(payload):\n    return pickle.loads(payload)\n\ndef handler():\n    try:\n        process()\n    except Exception as error:\n        return str(error)\n'
+
 def run_scan(scan_id,repo,is_demo):
     try:
         update(scan_id,'downloading')
@@ -174,7 +177,7 @@ def run_scan(scan_id,repo,is_demo):
         update(scan_id,'scanning'); findings=analyze(files)
         deps,status=([],'Sample scan: advisory lookups disabled.') if is_demo else check_dependencies(files)
         findings.extend(deps)
-        update(scan_id,'completed',dict(findings=findings,commit=sha,branch=branch,files=len(files),skipped=skipped,demo=is_demo,coverage=['Heuristic security patterns','Credential patterns','Python AST checks','Loose-end markers','Repeated blocks',status],limitations=['Dependency checks cover exact requirements.txt pins and npm package-lock v2/v3.','Heuristic findings require human review.','No findings does not establish security.']))
+        update(scan_id,'completed',dict(findings=findings,inventory=inventory(files),commit=sha,branch=branch,files=len(files),skipped=skipped,demo=is_demo,coverage=['Heuristic security patterns','Credential patterns','Python AST checks: imports, defaults, exceptions, timeouts, deserialization, runtime downloads, SQL candidates','JavaScript/HTML sink and empty-catch patterns','Loose-end markers','Repeated blocks',status],limitations=['Dependency checks cover exact requirements.txt pins and npm package-lock v2/v3.','Heuristic findings require human review.','No findings does not establish security.','No interprocedural data-flow analysis; source findings are review candidates, not confirmed exploits.']))
     except Exception as error:
         update(scan_id,'failed',{'error':str(error) if isinstance(error,RuntimeError) else 'Repository access or analysis failed. Check access and retry.'})
 

@@ -21,7 +21,7 @@ A real saved report with 174 entries becomes seven action areas: one source sett
 
 Browser → FastAPI → bounded background worker → pinned GitHub snapshot → language/file-based static checks + OSV → versioned explanatory report → browser/HTML/JSON.
 
-No LLM dependency, repository execution, GitHub visitor login, or write permissions. A deployment-only public-read token is optional for API quota. Reports are isolated by browser session.
+Core scanning has no LLM dependency. Optional Groq explanations turn a finding into issue, impact, fix, and verification guidance; click Explain with Groq to demonstrate when configured. No repository execution, GitHub visitor login, or write permissions. A deployment-only public-read token is optional for API quota. Reports are isolated by browser session.
 
 ## Be candid
 

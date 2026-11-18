@@ -126,3 +126,17 @@ Authenticated REST requests typically allow 5,000 requests/hour for a personal a
 See [DEMO.md](DEMO.md) for a three-minute presentation script. The versioned JSON includes `schema_version: 2`, summary counts, raw advisory counts, and grouped findings.
 
 No external model or analytics service is used.
+
+## Optional Groq explanations
+
+Set `GROQ_API_KEY` in Render's Environment settings and redeploy. Do not commit a key. `GROQ_MODEL` optionally overrides the default `llama-3.3-70b-versatile` (model availability depends on your Groq account). No new SDK is needed; the server uses Groq's OpenAI-compatible HTTPS API through httpx.
+
+On a completed report, click **Explain with Groq** on a finding. It returns four beginner-friendly sections: Issue, Why it matters, Suggested fix, and How to verify. AI text is explicitly labeled and escaped as plain text. It cannot change source findings, severity, or code. Exporting JSON/HTML includes explanations generated in the currently open report. Reloading requires clicking again; successful results are served from the server cache when still valid.
+
+Clicking shares a bounded, redacted finding summary and up to five advisory summaries with Groq. No full repository, GitHub token, or Groq key is included in model messages. Credential-like lines are suppressed before transmission, but automated redaction is not a guarantee against all sensitive content. Repository/advisory text is treated as untrusted evidence in the prompt. Do not request explanations for material you cannot share with an external provider.
+
+Responses must match a four-field schema. Missing/invalid credentials, quota limits, network errors, and malformed responses fall back to built-in guidance. There are no automatic retries. Groq errors and credentials are never returned verbatim to the browser. Generated recommendations are unverified and may be inaccurate: consult source evidence and test any changes. Patched versions and exploitability must not be inferred solely from model text.
+
+Successful explanations are cached per browser owner, redacted evidence fingerprint, prompt version, and model for seven days. Limits are 20 uncached requests/browser/hour, 60 globally/hour, and two concurrent requests/process. Public deployments should also enforce edge rate limits; browser-session limits are not identity-based abuse controls. Changing or removing the key disables further generation; deleting provider-side credentials must be done separately in Groq.
+
+API: `POST /api/scans/{scan_id}/findings/{finding_id}/explain`, using the same browser cookie and CSRF header as scans. Ownership and completed-scan checks apply. Scanning itself still works without Groq.

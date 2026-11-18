@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import time
 import zipfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,6 +20,7 @@ from pydantic import BaseModel,Field
 from scanner import analyze,EXTENSIONS
 from dependencies import check as check_dependencies
 from reporting import prepare_report
+import explanations
 
 ROOT=Path(__file__).parent
 DATA=Path(os.getenv('DATA_DIR',str(ROOT/'work')))
@@ -28,6 +30,7 @@ DEMO=os.getenv('DEMO_MODE','false').lower()=='true'
 # Optional deployment credential. Never read a token from a browser request.
 PUBLIC_GITHUB_TOKEN=os.getenv('PUBLIC_GITHUB_TOKEN','').strip()
 POOL=ThreadPoolExecutor(max_workers=2)
+AI_SLOTS=threading.BoundedSemaphore(2)
 app=FastAPI(title='RepoSentry',docs_url='/api/docs')
 
 @contextmanager
@@ -39,6 +42,8 @@ def db():
 with db() as c:
     c.executescript("""CREATE TABLE IF NOT EXISTS visitors(id TEXT PRIMARY KEY,csrf TEXT,expires REAL);
 CREATE TABLE IF NOT EXISTS public_scans(id TEXT PRIMARY KEY,owner TEXT,repo TEXT,status TEXT,data TEXT,created REAL);
+CREATE TABLE IF NOT EXISTS ai_cache(owner TEXT, fingerprint TEXT, data TEXT, created REAL, PRIMARY KEY(owner,fingerprint));
+CREATE TABLE IF NOT EXISTS ai_calls(owner TEXT, created REAL);
 UPDATE public_scans SET status='failed' WHERE status IN ('queued','downloading','scanning');""")
     # Invalidate legacy OAuth sessions, including their stored encrypted tokens.
     for legacy in ('sessions','oauth'):
@@ -80,7 +85,7 @@ def browser_session(request:Request):
     return response
 
 @app.get('/api/config')
-def config(): return {'publicOnly':True,'demoEnabled':DEMO}
+def config(): return {'publicOnly':True,'demoEnabled':DEMO,'aiConfigured':bool(os.getenv('GROQ_API_KEY','').strip())}
 
 def gh(path):
     headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
@@ -208,6 +213,37 @@ def scan(request:Request,scan_id:str):
     _,row=get_scan(request,scan_id); row['data']=json.loads(row['data'])
     if row['status']=='completed': row['data']=prepare_report(row['data'])
     row.pop('owner'); return row
+
+@app.post('/api/scans/{scan_id}/findings/{finding_id}/explain')
+def explain_finding(request:Request,scan_id:str,finding_id:str):
+    s,row=get_scan(request,scan_id,True)
+    if row['status']!='completed': raise HTTPException(409,'Wait for the scan to complete.')
+    report=prepare_report(json.loads(row['data']))
+    finding=next((f for f in report['findings'] if f['id']==finding_id),None)
+    if not finding: raise HTTPException(404,'Finding not found.')
+    if not os.getenv('GROQ_API_KEY','').strip():
+        return explanations.fallback(finding,'Groq is not configured. Built-in guidance is shown.')
+    fingerprint=explanations.cache_key(finding)
+    with db() as c:
+        cached=c.execute('SELECT data FROM ai_cache WHERE owner=? AND fingerprint=? AND created>?',(s['owner'],fingerprint,time.time()-7*86400)).fetchone()
+    if cached: return dict(json.loads(cached['data']),cached=True)
+    if not AI_SLOTS.acquire(blocking=False): raise HTTPException(429,'Explanation workers are busy. Please retry shortly.')
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            c.execute('DELETE FROM ai_calls WHERE created<?',(time.time()-3600,))
+            c.execute('DELETE FROM ai_cache WHERE created<?',(time.time()-7*86400,))
+            own=c.execute('SELECT count(*) FROM ai_calls WHERE owner=?',(s['owner'],)).fetchone()[0]
+            total=c.execute('SELECT count(*) FROM ai_calls').fetchone()[0]
+            if own>=20 or total>=60: raise HTTPException(429,'Explanation limit reached. Try again later; built-in recommendations remain available.')
+            c.execute('INSERT INTO ai_calls VALUES(?,?)',(s['owner'],time.time()))
+        result=explanations.generate(finding)
+        if result['status']=='generated':
+            with db() as c:
+                c.execute('INSERT OR REPLACE INTO ai_cache VALUES(?,?,?,?)',(s['owner'],fingerprint,json.dumps(result),time.time()))
+        return dict(result,cached=False)
+    finally:
+        AI_SLOTS.release()
 
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
 @app.get('/')

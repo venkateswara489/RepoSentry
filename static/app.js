@@ -45,9 +45,14 @@ function advisoryMarkup(f){
   if(!f.advisories)return '';
   return `<details class="advisories"><summary>Inspect ${f.advisories.length} advisory groups (${f.raw_advisory_count} source records)</summary>${f.advisories.map(a=>`<div class="advisory"><a target="_blank" rel="noopener noreferrer" href="https://osv.dev/vulnerability/${encodeURIComponent(a.id)}">${esc(a.id)} ↗</a><span class="severity ${esc(a.severity)}">${esc(a.severity)}</span><p>${esc(a.summary)}</p>${a.aliases.length?`<p>Related IDs: ${a.aliases.map(esc).join(', ')}</p>`:''}<p>${a.fixed_versions.length?'Fix releases reported by advisory: '+a.fixed_versions.map(esc).join(', '):'No fixed release information available in this report.'}</p></div>`).join('')}</details>`;
 }
+function aiMarkup(f){
+  if(!f.ai)return '';
+  const result=f.ai;
+  return `<div class="ai-guidance"><strong>${result.status==='generated'?'✦ Groq explanation':'Built-in fallback'}${result.cached?' · cached':''}</strong><p>${esc(result.message)}</p>${[['issue','Issue'],['impact','Why it matters'],['suggested_fix','Suggested fix'],['verification','How to verify']].map(([key,label])=>`<h4>${label}</h4><p>${esc(result.explanation[key])}</p>`).join('')}</div>`;
+}
 function card(f){
   const source=current.data.demo?`<span class="source">${esc(f.path)}:${f.line}</span>`:`<a target="_blank" rel="noopener noreferrer" class="source" href="https://github.com/${esc(current.repo)}/blob/${esc(current.data.commit)}/${f.path.split('/').map(encodeURIComponent).join('/')}#L${f.line}">${esc(f.path)}:${f.line} ↗</a>`;
-  return `<article class="finding"><div class="finding-top"><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span><h3>${esc(f.title)}</h3><span class="tag">${esc(f.category)}</span></div>${source}<pre>${esc(f.evidence)}</pre><h4>What this means</h4><p>${esc(f.explanation)}</p><h4>What to do next</h4><p>${esc(f.advice)}</p>${f.replacement?`<details><summary>Suggested code change — review before using</summary><pre>${esc(f.replacement)}</pre><p>This suggestion has not been executed or tested against your project.</p></details>`:''}<p class="severity-note">${esc(f.severity_basis)} · ${esc(f.confidence)}</p>${advisoryMarkup(f)}</article>`;
+  return `<article class="finding"><div class="finding-top"><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span><h3>${esc(f.title)}</h3><span class="tag">${esc(f.category)}</span></div>${source}<pre>${esc(f.evidence)}</pre><h4>What this means</h4><p>${esc(f.explanation)}</p><h4>What to do next</h4><p>${esc(f.advice)}</p>${f.replacement?`<details><summary>Suggested code change — review before using</summary><pre>${esc(f.replacement)}</pre><p>This suggestion has not been executed or tested against your project.</p></details>`:''}<p class="severity-note">${esc(f.severity_basis)} · ${esc(f.confidence)}</p>${advisoryMarkup(f)}<div class="ai-actions"><button class="button" data-explain="${esc(f.id)}">✦ Explain with Groq</button><small>Shares a redacted finding summary with Groq.</small></div>${aiMarkup(f)}</article>`;
 }
 function render(){
   if(!current||current.status!=='completed')return;
@@ -55,6 +60,14 @@ function render(){
   const findings=current.data.findings.filter(f=>($('severity').value==='all'||f.severity===$('severity').value)&&($('category').value==='all'||f.category===$('category').value)&&(!query||[f.title,f.path,f.rule,f.evidence].join(' ').toLowerCase().includes(query)));
   $('finding-count').textContent=findings.length;
   $('findings').innerHTML=findings.length?findings.map(card).join(''):'<div class="empty">No matching action areas. A clean report does not establish security.</div>';
+  document.querySelectorAll('[data-explain]').forEach(button=>button.onclick=()=>explain(button));
+}
+async function explain(button){
+  const finding=current.data.findings.find(f=>f.id===button.dataset.explain);
+  const report=current;
+  button.disabled=true;button.textContent='Generating explanation…';
+  try{const result=await api('/api/scans/'+report.id+'/findings/'+finding.id+'/explain',{method:'POST'});finding.ai=result;if(current===report)render();}
+  catch(e){notice(e.message);button.disabled=false;button.textContent='✦ Explain with Groq';}
 }
 async function start(sample=false){
   notice('');if(!auth){notice('Preparing browser session. Refresh and retry.');return;}
@@ -69,7 +82,7 @@ function save(content,type,suffix){const url=URL.createObjectURL(new Blob([conte
 $('export').onclick=()=>{if(current?.status==='completed')save(JSON.stringify(current,null,2),'application/json','json');};
 $('export-html').onclick=()=>{
   if(current?.status!=='completed')return;
-  const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'"><title>RepoSentry report</title></head><body><h1>RepoSentry: ${esc(current.repo)}</h1><p>Commit ${esc(current.data.commit)} · ${current.data.summary.action_areas} action areas · ${current.data.files} files analyzed</p><p>Static review candidates, not confirmed exploits. Review in context.</p>${current.data.findings.map(card).join('')}<h2>Coverage & limitations</h2>${$('coverage').innerHTML}</body></html>`;
+  const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'"><title>RepoSentry report</title></head><body><h1>RepoSentry: ${esc(current.repo)}</h1><p>Commit ${esc(current.data.commit)} · ${current.data.summary.action_areas} action areas · ${current.data.files} files analyzed</p><p>Static review candidates, not confirmed exploits. Review in context.</p>${current.data.findings.map(card).join('').replace(/<div class="ai-actions">[\s\S]*?<\/div>/g,'')}<h2>Coverage & limitations</h2>${$('coverage').innerHTML}</body></html>`;
   save(html,'text/html','html');
 };
 (async()=>{try{auth=await api('/api/session');const config=await api('/api/config');if(config.demoEnabled){$('repo').value='sample/storefront';$('connect-note').textContent='Sample mode: fixed fixture only; no repository is accessed.';}await history();}catch(e){notice(e.message);}})();
